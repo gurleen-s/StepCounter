@@ -14,7 +14,7 @@
     "assetBundlePatterns": ["**/*"],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.vadinsavin.StepCounter"
+      "bundleIdentifier": "com.gurleens.StepCounter"
     },
     "android": {
       "adaptiveIcon": {
