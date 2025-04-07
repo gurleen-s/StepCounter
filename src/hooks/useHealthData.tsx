@@ -35,6 +35,12 @@ const useHealthData = (date: Date) => {
       return;
     }
 
+    // Check if AppleHealthKit and isAvailable are defined
+    if (!AppleHealthKit || typeof AppleHealthKit.isAvailable !== 'function') {
+      console.log('AppleHealthKit not properly initialized');
+      return;
+    }
+
     AppleHealthKit.isAvailable((err, isAvailable) => {
       if (err) {
         console.log('Error checking availability');

@@ -8,22 +8,21 @@ podfile_properties = JSON.parse(File.read(File.join(__dir__, 'Podfile.properties
 ENV['RCT_NEW_ARCH_ENABLED'] = podfile_properties['newArchEnabled'] == 'true' ? '1' : '0'
 ENV['EX_DEV_CLIENT_NETWORK_INSPECTOR'] = '1' if podfile_properties['EX_DEV_CLIENT_NETWORK_INSPECTOR'] == 'true'
 
-platform :ios, podfile_properties['ios.deploymentTarget'] || '13.0'
-install! 'cocoapods',
-  :deterministic_uuids => false
+# Explicitly specify fmt version to match RCT-Folly's requirements
+# Version 6.2.1 is what RCT-Folly expects
+pod 'fmt', '6.2.1'
 
+platform :ios, '13.0'
 prepare_react_native_project!
 
 # If you are using a `react-native-flipper` your iOS build will fail when `NO_FLIPPER=1` is set.
-# because `react-native-flipper` depends on (FlipperKit,...), which will be excluded. To fix this,
-# you can also exclude `react-native-flipper` in `react-native.config.js`
+# because `react-native-flipper` depends on (FlipperKit,...) that will be excluded
 #
+# To fix this you can also exclude `react-native-flipper` using a `react-native.config.js`
 # ```js
 # module.exports = {
 #   dependencies: {
 #     ...(process.env.NO_FLIPPER ? { 'react-native-flipper': { platforms: { ios: null } } } : {}),
-#   }
-# }
 # ```
 flipper_config = FlipperConfiguration.disabled
 if ENV['NO_FLIPPER'] == '1' then
@@ -39,7 +38,19 @@ elsif podfile_properties.key?('ios.flipper') then
 end
 
 target 'StepCounter' do
+  # Ensure Expo modules are properly linked
   use_expo_modules!
+  
+  # Explicitly add ExpoModulesCore to fix module not found errors
+  pod 'ExpoModulesCore', :path => '../node_modules/expo-modules-core'
+  
+  post_integrate do |installer|
+    begin
+      expo_patch_react_imports!(installer)
+    rescue => e
+      Pod::UI.warn e
+    end
+  end
   config = use_native_modules!
 
   use_frameworks! :linkage => podfile_properties['ios.useFrameworks'].to_sym if podfile_properties['ios.useFrameworks']
@@ -53,38 +64,79 @@ target 'StepCounter' do
     :hermes_enabled => podfile_properties['expo.jsEngine'] == nil || podfile_properties['expo.jsEngine'] == 'hermes',
     :fabric_enabled => flags[:fabric_enabled],
     # An absolute path to your application root.
-    :app_path => "#{Pod::Config.instance.installation_root}/..",
-    # Note that if you have use_frameworks! enabled, Flipper will not work if enabled
-    :flipper_configuration => flipper_config
+    :app_path => "#{Pod::Config.instance.installation_root}/.."
   )
 
   post_install do |installer|
-    react_native_post_install(
-      installer,
-      config[:reactNativePath],
-      # Set `mac_catalyst_enabled` to `true` in order to apply patches
-      # necessary for Mac Catalyst builds
-      :mac_catalyst_enabled => false
-    )
-    __apply_Xcode_12_5_M1_post_install_workaround(installer)
-
-    # This is necessary for Xcode 14, because it signs resource bundles by default
-    # when building for devices.
-    installer.target_installation_results.pod_target_installation_results
-      .each do |pod_name, target_installation_result|
-      target_installation_result.resource_bundle_targets.each do |resource_bundle_target|
-        resource_bundle_target.build_configurations.each do |config|
-          config.build_settings['CODE_SIGNING_ALLOWED'] = 'NO'
+    # Fix for fmt library issues
+    installer.pods_project.targets.each do |target|
+      target.build_configurations.each do |config|
+        # Add preprocessor definitions to fix fmt library issues
+        config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= ['$(inherited)']
+        config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] << 'FMT_CHAR8_T=char' 
+        
+        # Fix for ExpoModulesCore not found
+        if target.name == 'ExpoModulesCore'
+          config.build_settings['CLANG_ENABLE_MODULES'] = 'YES'
+          config.build_settings['DEFINES_MODULE'] = 'YES'
+        end
+        
+        # Fix for fmt char_traits issue
+        if target.name == 'fmt'
+          # Create a custom definition to fix the char_traits specialization issue
+          config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] << 'FMT_USE_INTERNAL=1'
+          
+          # Add includes to make sure all necessary headers are found
+          config.build_settings['HEADER_SEARCH_PATHS'] ||= ['$(inherited)']
+          config.build_settings['HEADER_SEARCH_PATHS'] << '"$(PODS_ROOT)/fmt/include"'
+          
+          # Add a custom prefix header to fix the char8_type issues
+          prefix_pch = "#{Pod::Config.instance.installation_root}/Pods/Target Support Files/fmt/fmt-prefix.pch"
+          config.build_settings['GCC_PREFIX_HEADER'] = prefix_pch
+          
+          # Make sure directory exists
+          prefix_dir = File.dirname(prefix_pch)
+          unless Dir.exist?(prefix_dir)
+            FileUtils.mkdir_p(prefix_dir)
+          end
+          
+          # Create the prefix header with specialization for std::char_traits
+          File.open(prefix_pch, 'w') do |f|
+            f.puts "#ifndef FMT_PREFIX_PCH"
+            f.puts "#define FMT_PREFIX_PCH"
+            f.puts "// Ensure char8_type is char"
+            f.puts "#define FMT_CHAR8_T char"
+            f.puts "// Define fmt::internal::char8_type"
+            f.puts "namespace fmt { namespace internal { typedef char char8_type; }"
+            f.puts "inline namespace v6 { namespace internal { using fmt::internal::char8_type; } } }"
+            f.puts "// Add std::char_traits specialization"
+            f.puts "namespace std { template<> struct char_traits<fmt::internal::char8_type> : public char_traits<char> {}; }"
+            f.puts "#endif"
+          end
         end
       end
     end
-  end
-
-  post_integrate do |installer|
-    begin
-      expo_patch_react_imports!(installer)
-    rescue => e
-      Pod::UI.warn e
+    
+    # Expo modules specific fixes
+    installer.aggregate_targets.each do |aggregate_target|
+      aggregate_target.user_project.native_targets.each do |target|
+        target.build_configurations.each do |config|
+          # Ensure proper framework search paths for Expo modules
+          config.build_settings['FRAMEWORK_SEARCH_PATHS'] ||= ['$(inherited)']
+          config.build_settings['FRAMEWORK_SEARCH_PATHS'] << '"${PODS_ROOT}/../build/ios"'
+          
+          # Make sure module map files are found
+          config.build_settings['MODULEMAP_FILE'] = ''
+        end
+      end
     end
+    
+    # Required React Native post-install steps
+    react_native_post_install(
+      installer,
+      config[:reactNativePath],
+      :mac_catalyst_enabled => false
+    )
+    __apply_Xcode_12_5_M1_post_install_workaround(installer)
   end
 end

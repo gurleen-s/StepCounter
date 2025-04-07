@@ -1,0 +1,16 @@
+--- a/fmt/core.h
++++ b/fmt/core.h
+@@ -31,6 +31,13 @@
+ #include <string>
+ #include <type_traits>
+ 
++// Add char_traits specialization for char8_type
++namespace std {
++  template<>
++  struct char_traits<fmt::internal::char8_type> : public char_traits<char> {
++  };
++}
++
+ // The fmt library version in the form major * 10000 + minor * 100 + patch.
+ #define FMT_VERSION 60200
+ 
